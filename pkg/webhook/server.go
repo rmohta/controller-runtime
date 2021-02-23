@@ -155,47 +155,17 @@ func (s *Server) Start(stop <-chan struct{}) error {
 		}
 	}
 
-	certPath := filepath.Join(s.CertDir, s.CertName)
 	keyPath := filepath.Join(s.CertDir, s.KeyName)
-
-	certWatcher, err := certwatcher.New(certPath, keyPath)
+	_, err := os.Stat(keyPath)
+	var listener net.Listener
+	if err != nil {
+		listener, err = s.httpListener(stop)
+	} else {
+		listener, err = s.httpsListener(stop)
+	}
 	if err != nil {
 		return err
 	}
-
-	go func() {
-		if err := certWatcher.Start(stop); err != nil {
-			log.Error(err, "certificate watcher error")
-		}
-	}()
-
-	cfg := &tls.Config{
-		NextProtos:     []string{"h2"},
-		GetCertificate: certWatcher.GetCertificate,
-	}
-
-	// load CA to verify client certificate
-	if s.ClientCAName != "" {
-		certPool := x509.NewCertPool()
-		clientCABytes, err := ioutil.ReadFile(filepath.Join(s.CertDir, s.ClientCAName))
-		if err != nil {
-			return fmt.Errorf("failed to read client CA cert: %v", err)
-		}
-
-		ok := certPool.AppendCertsFromPEM(clientCABytes)
-		if !ok {
-			return fmt.Errorf("failed to append client CA cert to CA pool")
-		}
-
-		cfg.ClientCAs = certPool
-		cfg.ClientAuth = tls.RequireAndVerifyClientCert
-	}
-
-	listener, err := tls.Listen("tcp", net.JoinHostPort(s.Host, strconv.Itoa(int(s.Port))), cfg)
-	if err != nil {
-		return err
-	}
-
 	log.Info("serving webhook server", "host", s.Host, "port", s.Port)
 
 	srv := &http.Server{
@@ -222,6 +192,50 @@ func (s *Server) Start(stop <-chan struct{}) error {
 
 	<-idleConnsClosed
 	return nil
+}
+
+func (s *Server) httpListener(_ <-chan struct{}) (net.Listener, error) {
+	return net.Listen("tcp", net.JoinHostPort(s.Host, strconv.Itoa(int(s.Port))))
+}
+
+func (s *Server) httpsListener(stop <-chan struct{}) (net.Listener, error) {
+	certPath := filepath.Join(s.CertDir, s.CertName)
+	keyPath := filepath.Join(s.CertDir, s.KeyName)
+	certWatcher, err := certwatcher.New(certPath, keyPath)
+	if err != nil {
+		return nil, err
+	}
+
+	go func() {
+		if err := certWatcher.Start(stop); err != nil {
+			log.Error(err, "certificate watcher error")
+		}
+	}()
+
+	cfg := &tls.Config{
+		NextProtos:     []string{"h2"},
+		GetCertificate: certWatcher.GetCertificate,
+	}
+
+	// load CA to verify client certificate
+	if s.ClientCAName != "" {
+		certPool := x509.NewCertPool()
+		clientCABytes, err := ioutil.ReadFile(filepath.Join(s.CertDir, s.ClientCAName))
+		if err != nil {
+			return nil, fmt.Errorf("failed to read client CA cert: %v", err)
+		}
+
+		ok := certPool.AppendCertsFromPEM(clientCABytes)
+		if !ok {
+			return nil, fmt.Errorf("failed to append client CA cert to CA pool")
+		}
+
+		cfg.ClientCAs = certPool
+		cfg.ClientAuth = tls.RequireAndVerifyClientCert
+	}
+
+	listener, err := tls.Listen("tcp", net.JoinHostPort(s.Host, strconv.Itoa(int(s.Port))), cfg)
+	return listener, err
 }
 
 // InjectFunc injects the field setter into the server.
